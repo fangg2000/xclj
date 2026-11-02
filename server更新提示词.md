@@ -1,0 +1,615 @@
+# 任务：向 ComfyUI 的 server.py 按锚点插入自定义代码
+
+我会在消息末尾附上原始 server.py 全文。请你把下列代码块按锚点插入到正确位置，输出完整的修改后文件。
+
+## 硬性规则
+
+1. 只做"插入"，不修改、不删除原文件中任何已有代码。唯一例外是第 5 项要求在 `post_prompt` 函数体内插入 5 行。
+2. 插入前先搜索锚点字符串，确认存在且唯一。若某锚点找不到或出现多次，不要臆造位置，保持该代码块不插入，并在最终报告中列出"未匹配锚点清单"。
+3. 缩进：第 1、2 项为顶层（0 缩进）；第 3、4 项位于 `PromptServer.__init__` 内（与其他 `@routes` 装饰器一致的 8 空格缩进）；第 5 项位于 `post_prompt` 内（16 空格缩进）。下方代码块已按目标缩进书写，请直接采用。
+4. 输出格式（二选一）：
+   - **默认**：输出完整修改后的 server.py 全文。
+   - **若文件过长导致输出可能被截断**：改为逐项输出 patch，每项格式为「锚点前 3 行 + 新代码 + 锚点后 3 行」，并在开头声明"因长度原因采用 patch 模式"。
+5. 输出末尾附自检清单，每项写明：`第 N 项：插入成功 / 锚点未找到`，并给出行号。
+
+## 插入清单
+
+### 第 1 项：新增 import（顶层）
+
+**锚点**：原文件中 `import time` 这一行之后、`import nodes` 这一行之前。
+
+**插入内容**：
+
+```python
+import base64
+import re
+import shutil
+from pydub import AudioSegment
+```
+
+---
+
+### 第 2 项：顶层工具函数（0 缩进）
+
+**锚点**：`def create_block_external_middleware():` 的函数体结束处（即 `return block_external_middleware` 之后）、`class PromptServer():` 这一行之前。
+
+**插入内容**：
+
+```python
+# 定义返回对象(字符串)
+def result_entity(code=1, msg='', data=None):
+    if code == -1:
+        msg = '操作异常' if msg == '' else msg
+    elif code == 0:
+        msg = '操作失败' if msg == '' else msg
+    elif code == 2:
+        msg = '字段不能为空' if msg == '' else msg
+    else:
+        msg = '操作成功' if msg == '' else msg
+
+    if data == None:
+        return {'msg': msg, 'code': code}
+
+    return {'msg': msg, 'code': code, 'data': data}
+
+
+def get_comfyui_root():
+    main_module = sys.modules.get('__main__')
+    if main_module and hasattr(main_module, '__file__'):
+        main_path = os.path.abspath(main_module.__file__)
+        root_dir = os.path.dirname(main_path)
+        return root_dir
+    return None
+
+
+# 保存请求节点数据
+def save_prompt_to_file(data: dict, output_dir: str = None, filename: str = None) -> str:
+    if not isinstance(data, dict):
+        raise ValueError("传入的数据中不包含 'prompt' 字段")
+
+    output_dir = './output/workflow'
+    os.makedirs(output_dir, exist_ok=True)
+
+    if not filename:
+        filename = "workflow_prompt.json"
+    if not filename.endswith(".json"):
+        filename += ".json"
+
+    file_path = os.path.join(output_dir, filename)
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return file_path
+```
+
+---
+
+### 第 3 项：`POST /amix` 路由（8 缩进，位于 `__init__` 内）
+
+**锚点**：`@routes.get("/extensions")` 处理函数的 `return web.json_response(extensions)` 之后、`def get_dir_by_type(dir_type):` 之前。
+
+**插入内容**：
+
+```python
+        @routes.post("/amix")
+        async def server_status(request):
+            # json_params = await request.json()
+            json_params = await request.json()
+            json_post = json.dumps(json_params)
+            req_params = json.loads(json_post)
+
+            firstAudioPath = req_params['firstAudioPath']
+            paramList = req_params['paramList']
+            outAudioPath = req_params['outAudioPath']
+
+            sound1 = AudioSegment.from_wav(firstAudioPath)
+            output = None
+            offset = None
+            try:
+                for aParam in paramList:
+                    sound2 = AudioSegment.from_wav(aParam['audioPath'])
+
+                    if output == None:
+                        output = sound1.overlay(sound2, int(aParam['offset']))
+                    else:
+                        output = output.overlay(sound2, int(aParam['offset']))
+
+                # save the result
+                output.export(outAudioPath, format="wav")
+                return web.json_response(result_entity(1, msg='操作成功'))
+            except Exception as e:
+                print('音频合并异常:', e)
+                pass
+
+            return web.json_response(result_entity(1, msg='操作失败'))
+```
+
+---
+
+### 第 4 项：`get_file_category` + 9 个业务路由（8 缩进，位于 `__init__` 内）
+
+**锚点**：`@routes.post("/history")` 处理函数（`async def post_history`）的 `return web.Response(status=200)` 之后、`async def setup(self):` 这一行之前。作为**一个连续代码块**整体插入。
+
+**插入内容**：
+
+```python
+        # 判断文件大类
+        def get_file_category(file_ext: str):
+            ext = file_ext.lower().strip(".")
+            image_exts = {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
+            audio_exts = {"mp3", "wav", "m4a", "flac", "aac", "amr"}
+            video_exts = {"mp4", "avi", "mov", "mkv", "flv", "wmv", "webm"}
+            txt_exts = {"txt", "json", "csv", "xml", "yaml", "yml"}
+            model_exts = {"glb", "gltf", "safetensors", "pth"}   # 可按需增加其他 3D 格式
+
+            if ext in image_exts:
+                return "image"
+            elif ext in audio_exts:
+                return "audio"
+            elif ext in video_exts:
+                return "video"
+            elif ext in txt_exts:
+                return "txt"
+            elif ext in model_exts:
+                return "model"            # 3D 模型类型
+            return None
+
+        @routes.post("/mkdir")
+        async def create_dir(request):
+            try:
+                # 1. 获取请求的 JSON 数据
+                json_data = await request.json()
+
+                # 2. 获取文件夹名称，校验必填参数
+                folder_name = json_data.get("folder_name")
+                if not folder_name:
+                    return web.json_response(result_entity(0, msg="文件夹名称不能为空"))
+
+                # 3. 基础目录 + 要创建的文件夹（拼接完整路径）
+                base_dir = f"{get_comfyui_root()}/output"  # 你指定的基础目录
+                target_dir = os.path.join(base_dir, folder_name)  # 安全拼接路径
+
+                # 4. 创建文件夹（不存在则创建，存在则不报错）
+                # exist_ok=True：文件夹已存在时不会抛出异常
+                os.makedirs(target_dir, exist_ok=True)
+
+                # 5. 返回成功响应
+                return web.json_response(result_entity(1, msg='文件夹创建成功'))
+            except Exception as e:
+                # 异常处理：权限不足、路径非法等错误
+                return web.json_response(result_entity(0, msg=f'文件夹创建失败：{str(e)}'))
+
+        @routes.post("/clear_folder")
+        async def clear_all_files(request):
+            try:
+                # 1. 获取请求的 JSON 数据
+                json_data = await request.json()
+
+                # 2. 获取文件夹名称，校验必填参数
+                folder_name = json_data.get("folder_name")
+                if not folder_name:
+                    return web.json_response(result_entity(0, msg=f"「{folder_name}」文件夹名称不能为空"))
+
+                # 要清空的目标目录（和创建文件夹保持一致）
+                base_dir = f"{get_comfyui_root()}/output"
+                target_dir = os.path.join(base_dir, folder_name)  # 安全拼接路径
+
+                # 安全判断：目录不存在就直接返回
+                if not os.path.exists(target_dir):
+                    return web.json_response(result_entity(1, msg=f"「{folder_name}」目录不存在，无需清空"))
+
+                # 遍历目录下所有内容，逐个删除
+                for filename in os.listdir(target_dir):
+                    # 拼接完整路径
+                    file_path = os.path.join(target_dir, filename)
+
+                    # 删除文件
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        os.unlink(file_path)
+
+                    # 删除文件夹
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+
+                # 返回成功
+                return web.json_response(result_entity(1, msg=f"「{folder_name}」目录已清空"))
+
+            except Exception as e:
+                # 异常捕获：权限不足、文件被占用等
+                return web.json_response(result_entity(0, msg=f"清空目录失败：{str(e)}"))
+
+        @routes.post("/upload_file")
+        async def save_base64_file(request):
+            try:
+                # 1. 获取请求数据
+                json_data = await request.json()
+                base64_data = json_data.get("base64_data")
+                file_name = json_data.get("file_name")  # 可选，自定义文件名
+
+                if not base64_data:
+                    return web.json_response(result_entity(0, msg="base64 文件数据不能为空"))
+
+                # 2. 处理 base64 前缀（data:[<mediatype>][;base64],<data> 这种）
+                header = ""
+                if "," in base64_data:
+                    header, base64_data = base64_data.split(",", 1)
+
+                # 3. 尝试从 header 中提取文件扩展名 (全面的 MIME 映射)
+                extension = "bin"  # 默认扩展名
+                if header.startswith("data:"):
+                    # 提取 content type，例如 "data:video/mp4;base64" -> "video/mp4"
+                    mime_part = header[5:].split(";")[0]
+                    # 全面的 MIME 映射表，涵盖图片、视频、音频、文本
+                    mime_map = {
+                        # 图片格式
+                        "image/png": "png",
+                        "image/jpeg": "jpg",
+                        "image/gif": "gif",
+                        "image/bmp": "bmp",
+                        "image/webp": "webp",
+                        "image/svg+xml": "svg",
+                        # 视频格式
+                        "video/mp4": "mp4",
+                        "video/webm": "webm",
+                        "video/ogg": "ogg",
+                        "video/quicktime": "mov",
+                        "video/x-msvideo": "avi",
+                        "video/x-matroska": "mkv",
+                        "video/flv": "flv",
+                        "video/mpeg": "mpeg",
+                        # 音频格式
+                        "audio/mpeg": "mp3",
+                        "audio/wav": "wav",
+                        "audio/ogg": "ogg",
+                        "audio/aac": "aac",
+                        "audio/flac": "flac",
+                        "audio/m4a": "m4a",
+                        "audio/x-ms-wma": "wma",
+                        "audio/webm": "webm",
+                        # 文本格式
+                        "text/plain": "txt",
+                        "text/html": "html",
+                        "text/css": "css",
+                        "text/csv": "csv",
+                        "text/xml": "xml",
+                        "text/javascript": "js",
+                        "application/json": "json",
+                        "application/xml": "xml",
+                        "application/pdf": "pdf",
+                        "application/rtf": "rtf",
+                        # 压缩包格式
+                        "application/zip": "zip",
+                        "application/x-rar-compressed": "rar",
+                        "application/x-7z-compressed": "7z",
+                        "application/x-tar": "tar",
+                        "application/gzip": "gz",
+                        # 模型 / 安全张量文件
+                        "application/x-safetensors": "safetensors"
+                    }
+                    extension = mime_map.get(mime_part, "bin")
+
+                # 4. 保存目录（和之前保持一致）
+                base_dir = f"{get_comfyui_root()}/input"
+                os.makedirs(base_dir, exist_ok=True)  # 确保目录存在
+
+                # 5. 生成文件名（没有传就用时间戳）
+                if not file_name:
+                    file_name = f"file_{time.time()}.{extension}"
+
+                # 确保文件名有后缀 (如果用户传了文件名但没带后缀，根据识别到的类型补上)
+                if not re.search(r"\.\w+$", file_name):
+                    file_name += f".{extension}"
+
+                # 6. 拼接完整保存路径
+                save_path = os.path.join(base_dir, file_name)
+
+                # 7. 解码 base64 并保存文件
+                file_data = base64.b64decode(base64_data)
+                with open(save_path, "wb") as f:
+                    f.write(file_data)
+
+                # 8. 返回成功结果
+                return web.json_response(result_entity(
+                    1,
+                    msg="文件保存成功",
+                    data=save_path
+                ))
+
+            except base64.binascii.Error:
+                return web.json_response(result_entity(0, msg="base64 格式无效，解码失败"))
+            except Exception as e:
+                return web.json_response(result_entity(0, msg=f"文件保存失败：{str(e)}"))
+
+        @routes.post("/upload_image")
+        async def save_base64_image(request):
+            try:
+                # 1. 获取请求数据
+                json_data = await request.json()
+                base64_data = json_data.get("base64_data")
+                file_name = json_data.get("file_name")  # 可选，自定义文件名
+
+                if not base64_data:
+                    return web.json_response(result_entity(0, msg="base64 图片数据不能为空"))
+
+                # 2. 处理 base64 前缀（data:image/png;base64,xxxx 这种）
+                if "," in base64_data:
+                    base64_data = base64_data.split(",")[1]
+
+                # 3. 保存目录（和之前保持一致）
+                base_dir = f"{get_comfyui_root()}/input"
+                os.makedirs(base_dir, exist_ok=True)  # 确保目录存在
+
+                # 4. 生成文件名（没有传就用时间戳）
+                if not file_name:
+                    file_name = f"image_{time.time()}.png"
+
+                # 确保文件名是 .png/.jpg/.jpeg 等图片格式
+                if not re.search(r"\.(png|jpg|jpeg|gif|bmp)$", file_name, re.I):
+                    file_name += ".png"
+
+                # 5. 拼接完整保存路径
+                save_path = os.path.join(base_dir, file_name)
+
+                # 6. 解码 base64 并保存图片
+                image_data = base64.b64decode(base64_data)
+                with open(save_path, "wb") as f:
+                    f.write(image_data)
+
+                # 7. 返回成功结果
+                return web.json_response(result_entity(
+                    1,
+                    msg="图片保存成功",
+                    data=save_path
+                ))
+
+            except base64.binascii.Error:
+                return web.json_response(result_entity(0, msg="base64 格式无效，解码失败"))
+            except Exception as e:
+                return web.json_response(result_entity(0, msg=f"图片保存失败：{str(e)}"))
+
+        @routes.post("/count_files")
+        async def count_files_in_dir(request):
+            try:
+                json_data = await request.json()
+                folder_name = json_data.get("folder_name")
+                if not folder_name:
+                    return web.json_response(result_entity(0, msg="文件夹名称不能为空"))
+
+                # 安全绝对路径
+                comfy_root = get_comfyui_root()
+                if not comfy_root:
+                    return web.json_response(result_entity(0, msg="无法获取 ComfyUI 根目录"))
+
+                base_dir = os.path.abspath(os.path.join(comfy_root, "output", folder_name))
+                safe_root = os.path.abspath(os.path.join(comfy_root, "output"))
+
+                # 安全校验
+                if os.path.commonpath([base_dir, safe_root]) != safe_root:
+                    return web.json_response(result_entity(0, msg="非法路径访问"))
+
+                if not os.path.exists(base_dir):
+                    return web.json_response(result_entity(
+                        1,
+                        msg="目录不存在",
+                        data={
+                            "file_count": 0,
+                            "dir_count": 0,
+                            "total_count": 0,
+                            "total_size": 0,
+                            "files": []
+                        }
+                    ))
+
+                entries = os.listdir(base_dir)
+                file_count = 0
+                dir_count = 0
+                total_size = 0
+                files_list = []
+
+                for entry in entries:
+                    entry_path = os.path.join(base_dir, entry)
+                    if os.path.isdir(entry_path):
+                        dir_count += 1
+                    elif os.path.isfile(entry_path):
+                        file_count += 1
+                        total_size += os.path.getsize(entry_path)
+                        # 只返回 相对路径
+                        files_list.append(f"{folder_name}/{entry}")
+
+                total_count = file_count + dir_count
+
+                # 所有统计字段 100% 保留
+                return web.json_response(result_entity(
+                    1,
+                    msg="获取文件列表成功",
+                    data={
+                        "file_count": file_count,    # 文件数
+                        "dir_count": dir_count,      # 文件夹数
+                        "total_count": total_count,  # 总数 ✅
+                        "total_size": total_size,    # 总大小 ✅
+                        "files": files_list          # 相对路径列表 ✅
+                    }
+                ))
+
+            except Exception as e:
+                return web.json_response(result_entity(0, msg=f"获取列表失败：{str(e)}"))
+
+        @routes.post("/get_file")
+        async def get_single_file(request):
+            try:
+                json_data = await request.json()
+
+                # 直接接收列表返回的相对路径字符串，例如 "my_folder/image.png"
+                relative_path = json_data.get("file_path")
+                if not relative_path:
+                    return web.json_response(result_entity(0, msg="file_path 不能为空"))
+
+                comfy_root = get_comfyui_root()
+                if not comfy_root:
+                    return web.json_response(result_entity(0, msg="无法获取 ComfyUI 根目录"))
+
+                # 1. 构建完整绝对路径
+                target_file_path = os.path.abspath(os.path.join(comfy_root, "output", relative_path))
+                # 2. 定义安全根目录 (output 目录)
+                safe_root_dir = os.path.abspath(os.path.join(comfy_root, "output"))
+
+                # --- 安全检查：防止路径穿越 (例如 file_path 是 "../secret.txt") ---
+                if os.path.commonpath([safe_root_dir, target_file_path]) != safe_root_dir:
+                    return web.json_response(result_entity(0, msg="非法的文件路径访问"))
+
+                if not os.path.isfile(target_file_path):
+                    return web.json_response(result_entity(0, msg="文件不存在"))
+
+                # 读取文件
+                with open(target_file_path, "rb") as f:
+                    file_bytes = f.read()
+
+                # 获取文件名用于返回
+                file_name = os.path.basename(target_file_path)
+                file_ext = os.path.splitext(file_name)[1]
+
+                return web.json_response(result_entity(
+                    1,
+                    msg="获取文件成功",
+                    data={
+                        "file_name": file_name,
+                        "file_size": len(file_bytes),
+                        "file_type": get_file_category(file_ext),
+                        "file_base64": base64.b64encode(file_bytes).decode("utf-8")
+                    }
+                ))
+
+            except Exception as e:
+                return web.json_response(result_entity(0, msg=f"读取文件失败：{str(e)}"))
+
+        @routes.post("/remove_file")
+        async def remove_file(request):
+            """
+                                删除 ComfyUI output 目录下的指定文件
+                                请求体 JSON: {"file_path": "my_folder/image.png"}
+            """
+            try:
+                json_data = await request.json()
+                relative_path = json_data.get("file_path")
+                if not relative_path:
+                    return web.json_response(result_entity(0, msg="file_path 不能为空"))
+
+                comfy_root = get_comfyui_root()
+                if not comfy_root:
+                    return web.json_response(result_entity(0, msg="无法获取 ComfyUI 根目录"))
+
+                # 1. 构建完整绝对路径
+                #target_file_path = os.path.abspath(os.path.join(comfy_root, "output", relative_path))
+                # 2. 定义安全根目录 (output 目录)
+                safe_root_dir = os.path.abspath(os.path.join(comfy_root, "input"))
+
+                # --- 安全检查：防止路径穿越 (例如 file_path 是 "../secret.txt") ---
+                if os.path.commonpath([safe_root_dir, relative_path]) != safe_root_dir:
+                    return web.json_response(result_entity(0, msg="非法的文件路径访问"))
+
+                # 确认是文件而不是目录
+                if not os.path.isfile(relative_path):
+                    return web.json_response(result_entity(0, msg="文件不存在"))
+
+                # 执行删除
+                os.remove(relative_path)
+
+                return web.json_response(result_entity(1, msg="文件删除成功"))
+            except PermissionError:
+                return web.json_response(result_entity(0, msg="文件删除失败：权限不足"))
+            except OSError as e:
+                return web.json_response(result_entity(0, msg=f"文件删除失败：{str(e)}"))
+            except Exception as e:
+                return web.json_response(result_entity(0, msg=f"删除失败：{str(e)}"))
+
+        @routes.post("/get_all_media_files")
+        async def get_all_media_files(request):
+            # 1. 获取请求的 JSON 数据
+            json_data = await request.json()
+
+            # 2. 获取文件夹名称，校验必填参数
+            folder_name = json_data.get("folder_name")
+            if not folder_name:
+                return web.json_response(result_entity(0, msg=f"「{folder_name}」文件夹名称不能为空"))
+
+            # 目标目录（和你之前的接口保持一致）
+            base_dir = f"{get_comfyui_root()}/output/{folder_name}"
+            file_list = []
+
+            # 目录不存在直接返回空列表
+            if not os.path.exists(base_dir):
+                return web.json_response(result_entity(0, msg=f"「{folder_name}」目录不存在"))
+
+            # 遍历目录所有文件
+            for filename in os.listdir(base_dir):
+                file_path = os.path.join(base_dir, filename)
+
+                # 只处理文件，跳过文件夹
+                if not os.path.isfile(file_path):
+                    continue
+
+                # 获取后缀 & 类型，非媒体文件直接跳过
+                file_ext = os.path.splitext(filename)[1]
+                file_type = get_file_category(file_ext)
+                if not file_type:
+                    continue
+
+                print(f"处理文件：{filename}")
+
+                try:
+                    # 读取文件 + Base64
+                    with open(file_path, "rb") as f:
+                        file_bytes = f.read()
+
+                    file_list.append({
+                        "file_name": filename,
+                        "file_ext": file_ext,
+                        "file_type": file_type,  # image / audio / video / txt
+                        "file_size": len(file_bytes),
+                        "file_base64": base64.b64encode(file_bytes).decode("utf-8")
+                    })
+
+                except Exception as e:
+                    # 单个文件失败不中断，继续下一个
+                    continue
+
+            return web.json_response(result_entity(
+                1,
+                msg=f"共 {len(file_list)} 个媒体文件",
+                data=file_list
+            ))
+
+        @routes.post("/status")
+        async def server_status(request):
+            # json_params = await request.json()
+            return web.json_response(result_entity(1, msg='服务状态正常'))
+```
+
+---
+
+### 第 5 项：`post_prompt` 内保存 prompt（16 缩进）
+
+**锚点**：`post_prompt` 函数内 `client_prompt_id = json_data.get("prompt_id")` 这一行之后、`if client_prompt_id is None:` 之前。
+
+**插入内容**：
+
+```python
+                # 保存 prompt 到 ./output/workflow
+                try:
+                    path = save_prompt_to_file(prompt)
+                    #print(f"[prompt] 已保存到: {path}")
+                except Exception as e:
+                    print(f"[prompt] 保存失败: {e}")
+```
+
+---
+
+## 附加说明（不要执行，仅供报告）
+
+- 第 3 项和第 4 项末尾各有一个 `async def server_status`，函数名重复但路由不同（`/amix` 与 `/status`），aiohttp 按路由注册函数对象本身，不会冲突，保持原样即可。
+- 第 4 项中 `/remove_file` 的路径校验使用 `relative_path` 而非拼接后的绝对路径，属原代码既有写法，保持原样，不要修改。
+- 如果原文件中已存在同名函数或同名路由，不要重复插入，在报告中标注"已存在，跳过"。
+
+## 请开始处理。以下是原始 server.py 全文：
+
+<<< 在此处粘贴原始 server.py 全文 >>>
